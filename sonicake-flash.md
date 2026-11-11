@@ -12,6 +12,8 @@ payload **length** (not a type), and the device **ACKs** each frame.
 - Uploader: `upload.py` — rawmidi transport, ACK-paced, multi-segment.
 - Dry run of `PocketMaster_CFW0.9.8_base1.3.3.bin`: **5 segments, 2,125,616 B,
   111,890 frames, 5,370,344 wire bytes, 19 B chunks.**
+- Smart Box: same container and same map (`Smart Box Firmware V1.0.6.bin`
+  parses cleanly, 5 segments, identical addresses); see section 10.
 - Hardware: the init frame gets a **valid ACK** over rawmidi. rtmidi input does
   not receive; use rawmidi (`/dev/snd/midiC2D0`) or `amidi`.
 
@@ -28,6 +30,11 @@ The Flutter UI tells the user:
 > Press and hold the 1st and 2nd footswitch and the VOL/VALUE knob at the same
 > time and turn on the device until the screen lights up to enter the update
 > mode.
+
+For the **Smart Box** the app instead says:
+
+> Press and hold the 'PARA' button to turn on the device, enabling the device to
+> enter update mode.
 
 So the button combo is mandatory; then connect USB and start the update.
 
@@ -203,3 +210,41 @@ HTFW 'Pocket Master' v1.3.3: 5 segments, 2125616 B payload,
   from the state machine and should be confirmed by watching the first segment.
 - The old notes' "`0x23` = payload length" and "80-byte trailer" are wrong; use
   `count @ 0x22` and `payload = file[0x88:]`.
+
+## 10. Smart Box
+
+`Smart Box Firmware V1.0.6.bin` uses the same container, the same segment flags
+and the same target addresses, so everything above applies unchanged. Only the
+model string and the payload differ.
+
+| # | flags | addr | Pocket Master | Smart Box |
+|---|---|---|---|---|
+| 0 | `0x63` | `0x00200000` | 50748 | 50868 |
+| 1 | `0x67` | `0x00240000` | 299088 | 314636 |
+| 2 | `0x66` | `0x00280000` | 32768 | 32768 |
+| 3 | `0x62` | `0x00000000` | 1424224 | 1498288 |
+| 4 | `0x65` | `0x00190000` | 249856 | 249856 |
+
+- Model field (`0x0c`) is `Smart Box`. The app passes the device name to the
+  DLL, which compares it with this field (export
+  `isRealFirmwareWithDeviceName`); `upload.py` does the same against the ALSA
+  card name.
+- Update mode: hold **PARA** while powering on.
+- **Version caveat:** `0x1C` is `56 01 03 03` on Pocket Master 1.3.3 but
+  `42 00 00 04` on Smart Box 1.0.6, so the Pocket Master version decode prints a
+  bogus `0.0.4`. Segment 0 carries the useful tag at offset 8 (`V132` vs
+  `V101`); `htfw.py` prints both the raw bytes and the tag.
+- Confirmed on hardware in update mode: USB `84ef:0287`, product `Smart Box`,
+  serial `20240704`, interface class `0x01` subclass `0x03` (MIDI streaming) on
+  `snd-usb-audio`, 64-byte bulk endpoints, full speed. ALSA card id `Box`,
+  description `Smart Box`, rawmidi `/dev/snd/midiC3D0`, `amidi` port
+  `hw:3,0,0 Smart Box MIDI 1`.
+- Confirmed: the init frame `11 60` is ACKed with exactly the Pocket Master's
+  reply -- `crc=ok count=1 index=0 blen=3 payload=14 08 00`, i.e. ACK type
+  `0x14`, status 0.
+- Still unconfirmed: that the announce (`11 61`), stream and `11 6e` frames are
+  ACKed the same way. Only an actual upload exercises those.
+- The protocol was recovered from the 2,437,120 B `5868USB.dll`; Sonicake
+  Manager 1.5.2 ships a 2,902,016 B build that keeps the same exports
+  (`isRealFirmwareWithDeviceName`, `checkCrc`, `deviceStartUpdate`) and the same
+  `Smart Box` string handling.

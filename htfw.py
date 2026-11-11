@@ -29,12 +29,28 @@ PocketMaster_CFW0.9.8_base1.3.3 (2,125,752 B, 5 segments):
 The old "80-byte 0xFF trailer" was a misreading: 5 records * 16 B = 80 B, and
 the data region starts right after it.  There is no trailer.
 """
+import re
 import struct
 import hashlib
 import json
 import sys
 
 MAGIC = b"HTFW"
+USAGE = "usage: htfw.py [--expect-model NAME] FILE.bin [FILE.bin ...]"
+
+
+def image_version(segments):
+    """Best-effort version tag from the start of segment 0.
+
+    Both shipping images carry a short banner there: ``V132`` in
+    Pocket Master 1.3.3 and ``V101`` in Smart Box 1.0.6.  The ``0x1C`` header
+    field is *not* a version on every model -- Smart Box stores ``42 00 00 04``
+    in a 1.0.6 release -- so this is a display aid, not an authority.
+    """
+    if not segments or not segments[0]["data"]:
+        return None
+    m = re.search(rb"V\d+(?:\.\d+){0,2}", segments[0]["data"][:32])
+    return m.group(0).decode("ascii") if m else None
 HDR_LEN = 0x38
 REC_LEN = 16
 
@@ -61,6 +77,7 @@ def parse(path):
         "model": b[0x0C:0x1C].split(b"\0")[0].decode("ascii", "replace"),
         "u1C": u32(0x1C),
         "version": "%d.%d.%d" % (b[0x1D], b[0x1E], b[0x1F]),
+        "version_raw": b[0x1C:0x20].hex(),
         "b1C": b[0x1C],
         "b20": b[0x20],
         "b21": b[0x21],
@@ -90,6 +107,7 @@ def parse(path):
         segments.append(rec)
     f["segments"] = segments
 
+    f["image_version"] = image_version(segments)
     f["payload"] = b[data_base:data_base + f["payload_len"]]
     f["payload_sha256"] = hashlib.sha256(f["payload"]).hexdigest()
     f["total_len"] = sum(s["length"] for s in segments)
@@ -121,17 +139,40 @@ def check_model(f, expected):
 
 
 def main(argv):
-    if not argv:
-        print("usage: htfw.py FILE.bin [FILE.bin ...]", file=sys.stderr)
+    expect = None
+    files = []
+    rest = list(argv)
+    while rest:
+        a = rest.pop(0)
+        if a in ("--expect-model", "--confirm-model"):
+            if not rest:
+                print("%s needs a NAME" % a, file=sys.stderr)
+                return 2
+            expect = rest.pop(0)
+        elif a in ("-h", "--help"):
+            print(USAGE)
+            return 0
+        else:
+            files.append(a)
+    if not files:
+        print(USAGE, file=sys.stderr)
         return 2
     rc = 0
-    for p in argv:
+    for p in files:
         try:
             f = parse(p)
         except ValueError as e:
             print("%s\n  ERROR: %s" % (p, e), file=sys.stderr)
             rc = 1
             continue
+        if expect is not None and not check_model(f, expect):
+            print("%s\n  ERROR: model %r != expected %r"
+                  % (p, f["model"], expect), file=sys.stderr)
+            rc = 1
+            continue
+        print("  model %r, version field %s, image tag %s"
+              % (f["model"], f["version_raw"], f["image_version"] or "-"),
+              file=sys.stderr)
         shown = dict((k, v) for k, v in f.items()
                      if k not in ("payload", "segments"))
         shown["segments"] = [

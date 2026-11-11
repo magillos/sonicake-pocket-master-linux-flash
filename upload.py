@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Upload an HTFW firmware image to a 5868USB device (Sonicake Pocket Master).
+"""Upload an HTFW firmware image to a 5868USB device.
+
+Works for the Sonicake Pocket Master and the Sonicake Smart Box: both ship the
+same HTFW container, the same 5-segment flash map and the same upload state
+machine, and both are flashed by the same DLL code path.  The image is
+identified by the model string in its header, which is matched against the
+ALSA card name -- the same check the DLL exposes as
+``isRealFirmwareWithDeviceName``.
 
 Protocol recovered from 5868USB.dll.  The device runs a small state machine
 (sub_180092850) that is ACK-paced: after every frame it sets a "waiting" flag
@@ -23,6 +30,11 @@ sub_180092b70 / sub_180091cb0 / sub_180091a00):
 
 All frames are nibble-expanded (the entry type at state+0xa8 is 1, so chunk
 size is 19).  byte3 of the wire header is the payload length.
+
+The addresses cited above are from the 2,437,120 B DLL build the protocol was
+recovered from.  Sonicake Manager 1.5.2 ships a newer 2,902,016 B build with the
+same exports (isRealFirmwareWithDeviceName, checkCrc, deviceStartUpdate) and the
+same Smart Box handling, so the sequence below still applies.
 
 DANGEROUS BY DESIGN GUARD: dry run unless --i-understand-the-risk is given.
 """
@@ -72,26 +84,102 @@ def build_actions(fw):
     return actions
 
 
-def find_rawmidi(explicit=None):
-    """Locate the Pocket Master rawmidi node (e.g. /dev/snd/midiC2D0)."""
-    if explicit:
-        return explicit
+def _norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def sound_cards():
+    """Parse /proc/asound/cards -> {card_no: (id, description)}."""
     try:
-        cards = open("/proc/asound/cards", encoding="utf-8", errors="replace").read()
+        text = open("/proc/asound/cards", encoding="utf-8", errors="replace").read()
     except OSError:
-        cards = ""
-    for line in cards.splitlines():
-        if "Pocket Master" in line or "PocketMaster" in line:
-            m = re.match(r"\s*(\d+)\s*\[", line)
-            if not m:
-                continue
-            card = int(m.group(1))
-            for d in range(4):
-                path = "/dev/snd/midiC%dD%d" % (card, d)
-                if os.path.exists(path):
-                    return path
-    sys.exit("Pocket Master rawmidi device not found (is it connected / in update "
-             "mode?); pass --rawmidi /dev/snd/midiCxDy")
+        return {}
+    cards = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*(\d+)\s*\[([^\]]*)\]\s*:\s*\S+\s*-\s*(.*)$", line)
+        if m:
+            cards[int(m.group(1))] = (m.group(2).strip(), m.group(3).strip())
+    return cards
+
+
+def midi_node(card):
+    for d in range(4):
+        path = "/dev/snd/midiC%dD%d" % (card, d)
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def card_of_node(path):
+    m = re.search(r"midiC(\d+)D\d+", os.path.basename(path))
+    return int(m.group(1)) if m else None
+
+
+def usb_id(card):
+    try:
+        return open("/proc/asound/card%d/usbid" % card).read().strip()
+    except OSError:
+        return ""
+
+
+def find_rawmidi(explicit=None, model=None):
+    """Locate the rawmidi node (e.g. /dev/snd/midiC2D0) for a 5868USB device.
+
+    Prefers the card whose ALSA id/description matches the firmware's model
+    ("Pocket Master" / "Smart Box"), then the only card exposing a rawmidi
+    node, and finally reports the candidates so the caller can pick one.
+    """
+    if explicit:
+        return explicit, card_of_node(explicit)
+    cards = sound_cards()
+    wanted = _norm(model)
+    candidates = []
+    for num in sorted(cards):
+        node = midi_node(num)
+        if not node:
+            continue
+        cid, desc = cards[num]
+        if wanted and (wanted in _norm(cid) or wanted in _norm(desc)):
+            return node, num
+        candidates.append((node, num, "%d [%s] %s" % (num, cid, desc)))
+    if len(candidates) == 1:
+        node, num, label = candidates[0]
+        print("rawmidi: no card named %r; using the only MIDI card: %s"
+              % (model, label), file=sys.stderr)
+        return node, num
+    lines = ["no rawmidi node for model %r (is the device connected in update "
+             "mode?)" % model if model else "no rawmidi node found"]
+    for node, num, label in candidates:
+        lines.append("  %s -> %s (usb %s)" % (label, node, usb_id(num) or "?"))
+    lines.append("pass --rawmidi /dev/snd/midiCxDy to select one")
+    sys.exit("\n".join(lines))
+
+
+def guard_model(fw, card, allow):
+    """Refuse to flash an image that is not for the connected device.
+
+    Mirrors the DLL's isRealFirmwareWithDeviceName: the image model and the
+    device name (here the ALSA card name) must agree.
+    """
+    if card is None:
+        return
+    cid, desc = sound_cards().get(card, ("", ""))
+    label = "%d [%s] %s" % (card, cid, desc)
+    device = _norm(desc) or _norm(cid)
+    model = _norm(fw["model"])
+    if not device:
+        print("warning: cannot read the name of card %d; model not checked" % card,
+              file=sys.stderr)
+        return
+    if model and (model in device or device in model):
+        print("card %s matches the image model %r" % (label, fw["model"]),
+              file=sys.stderr)
+        return
+    msg = "refusing: image is for %r but the connected card is %s" % (fw["model"], label)
+    if allow:
+        print("warning: %s (continuing: --allow-model-mismatch)" % msg, file=sys.stderr)
+        return
+    sys.exit(msg + "\npass --allow-model-mismatch to override")
 
 
 def _write_all(fd, data, timeout=5.0):
@@ -281,7 +369,10 @@ def main():
                     help="blind pacing (ignore replies; debugging only)")
     ap.add_argument("--probe", action="store_true",
                     help="send only the init frame, print replies, then exit")
-    ap.add_argument("--confirm-model", default=None)
+    ap.add_argument("--confirm-model", "--expect-model", dest="confirm_model",
+                    default=None, help="expected HTFW model string")
+    ap.add_argument("--allow-model-mismatch", action="store_true",
+                    help="flash even if the card name and the image model differ")
     ap.add_argument("--i-understand-the-risk", action="store_true")
     a = ap.parse_args()
 
@@ -293,9 +384,10 @@ def main():
 
     actions = build_actions(fw)
     wire = sum(len(f) for f, _ in actions)
-    print("HTFW %r v%s: %d segments, %d B payload, %d frames, %d wire bytes, "
-          "%d B chunks" % (fw["model"], fw["version"], len(fw["segments"]),
-                           fw["payload_len"], len(actions), wire, CHUNK),
+    print("HTFW %r version field %s, image tag %s: %d segments, %d B payload, "
+          "%d frames, %d wire bytes, %d B chunks"
+          % (fw["model"], fw["version_raw"], fw["image_version"] or "-",
+             len(fw["segments"]), fw["payload_len"], len(actions), wire, CHUNK),
           file=sys.stderr)
     for s in fw["segments"]:
         print("  seg %d flags=%#04x addr=%#010x off=%#08x len=%d (%d frames)"
@@ -313,7 +405,9 @@ def main():
         return 0
 
     if a.transport == "rawmidi":
-        port = RawMidi(find_rawmidi(a.rawmidi))
+        node, card = find_rawmidi(a.rawmidi, fw["model"])
+        guard_model(fw, card, a.allow_model_mismatch)
+        port = RawMidi(node)
         print("rawmidi %s" % port.path, file=sys.stderr)
         send, poll, keep = port.send, port.poll, port
     elif a.transport == "alsa":
