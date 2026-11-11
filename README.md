@@ -12,7 +12,7 @@ map; only the model string and the payload differ, so one toolset covers both.
 > plus the official Sonicake Manager as a fallback.
 >
 > **Smart Box support is not upstream.** It was written and tested against
-> **one** Smart Box unit (USB `84ef:0287`) with a single
+> **one** Smart Box unit (USB `84ef:0287`, and CFW custom firmware based on V1.0.6) with a single
 > successful flash.
 > There is no warranty of any kind: if it bricks your device, that risk is
 > entirely yours.
