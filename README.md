@@ -12,9 +12,8 @@ map; only the model string and the payload differ, so one toolset covers both.
 > plus the official Sonicake Manager as a fallback.
 >
 > **Smart Box support is not upstream.** It was written and tested against
-> **one** Smart Box unit (USB `84ef:0287`, firmware 1.0.6) with a single
-> successful flash. The upstream author has no Smart Box to test with, and the
-> upload sequence beyond the init frame was confirmed only by that one run.
+> **one** Smart Box unit (USB `84ef:0287`) with a single
+> successful flash.
 > There is no warranty of any kind: if it bricks your device, that risk is
 > entirely yours.
 
